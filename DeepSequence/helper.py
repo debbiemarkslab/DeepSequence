@@ -240,7 +240,7 @@ class DataHelper:
 
         for pos,wt_aa,mut_aa in mutant_tuple_list:
             if pos not in self.uniprot_focus_col_to_wt_aa_dict \
-                or self.uniprot_focus_col_to_wt_aa_dict[pos] == wt_aa:
+                or self.uniprot_focus_col_to_wt_aa_dict[pos] != wt_aa:
                 print ("Not a valid mutant!",pos,wt_aa,mut_aa)
                 return None
 
