@@ -1,2 +1,10 @@
 *.a2m
 *.fasta
+*.fa
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
