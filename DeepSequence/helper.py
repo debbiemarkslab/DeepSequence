@@ -661,6 +661,170 @@ class DataHelper:
 
             OUTPUT.close()
 
+    def custom_mutant_matrix_df(self, input_filename, model, mutant_col, effect_col, N_pred_iterations=2000, \
+                                minibatch_size=2000, output_filename_prefix="", silent_allowed=False,
+                                lowercase_allowed=False, random_seed=None):
+
+        """ Predict the delta elbo for a custom mutation filename, using pandas dataframes.
+        """
+        if silent_allowed:
+            print("Silent mutations allowed")
+        if lowercase_allowed:
+            print("Lowercase allowed")
+        import pandas as pd  # Need pandas for this function
+
+        # run through the input file
+        if not os.path.isfile(input_filename):
+            input_filename = os.path.join(self.working_dir, input_filename)
+            assert os.path.isfile(input_filename), "File not found: " + input_filename
+
+        print("Going through input file:", input_filename)
+        df_input = pd.read_csv(input_filename)
+        print(df_input.head(30))
+        print(len(df_input), "rows")
+        assert mutant_col in df_input.columns, "Mutant column {} not found in input file, columns={}".format(mutant_col, str(df_input.columns))
+        assert effect_col in df_input.columns, "Effect column {} not found in input file, columns={}".format(effect_col, str(df_input.columns))
+        print("cleaning up dms")
+        df, _ = DMS_file_cleanup(DMS_data=df_input, target_seq=self.focus_seq, alphabet=self.alphabet,
+                                 DMS_mutant_column=mutant_col, DMS_phenotype_name=effect_col)
+        print(df.head(30))
+        print(len(df), "rows after cleanup")
+
+        # Get the start and end index from the sequence name
+        start_idx, end_idx = self.focus_seq_name.split("/")[-1].split("-")
+        start_idx = int(start_idx)
+
+        # wt_pos_focus_idx_tuple_list = []
+        focus_seq_index = 0
+        # focus_seq_list = []
+        mutant_to_letter_pos_idx_focus_list = {}
+
+        # find all possible valid mutations that can be run with this alignment
+        print("Generating valid mutations")
+        print("focus_seq", self.focus_seq_name, ":", self.focus_seq)
+        print("focus_seq_trimmed ", self.focus_seq_trimmed)
+
+        assert model.seq_len == len(self.focus_cols)
+
+        for i, letter in enumerate(self.focus_seq):
+            if i % 10 == 0:
+                print(i)
+
+            # seq=aBcdE, focus_seq_trimmed=BE,
+            # then A1B will be invalid (lowercase);
+            # B2M is valid and the mutated focus_seq is ME (mutating index 0)
+            if letter == letter.upper():  # or lowercase_allowed:
+                for mut in self.alphabet:
+                    pos = start_idx + i
+                    if letter != mut:
+                        mutant = letter + str(pos) + mut
+                        mutant_to_letter_pos_idx_focus_list[mutant] = [letter, pos, focus_seq_index]
+                focus_seq_index += 1
+            # else: # for debugging
+            #     print("lowercase letter: ", focus_seq_index, letter)
+
+        print("All possible (single?) mutations:", mutant_to_letter_pos_idx_focus_list)
+
+        def get_mutated_seq(mutants):
+            mutant_list = mutants.split(":")
+            focus_seq_copy = list(self.focus_seq_trimmed)[:]
+
+            for mutant in mutant_list:
+                wt_aa, pos, idx_focus = mutant_to_letter_pos_idx_focus_list[mutant]
+                mut_aa = mutant[-1]
+                focus_seq_copy[idx_focus] = mut_aa
+
+            return focus_seq_copy
+
+        print("Getting mutated sequences")
+        # First sequence is the wt sequence
+        mutant_sequences = [list(self.focus_seq_trimmed)[:]]
+        valid_mutants = ['wt']
+        # df_input.apply(lambda row: get_mutated_seq(row['mutant']), axis=1).to_list()
+        for mutants in df['mutant'].to_list():
+            assert isinstance(mutants, str), "mutants is not a string: " + str(mutants)
+            mutant_list = mutants.split(":")
+
+            valid_mutant = True
+            # TODO handle silent mutations, don't raise errors for them
+            # if any of the mutants in this list aren"t in the focus sequence,
+            #    I cannot make a prediction
+            for mutant in mutant_list:
+                if mutant not in mutant_to_letter_pos_idx_focus_list:
+                    valid_mutant = False
+                    print("Invalid mutant:", mutant)
+                    print("mutant_list", mutant_list)
+                    break
+
+            # If it is a valid mutant, add it to my list to make predictions
+            if valid_mutant:
+                focus_seq_copy = list(self.focus_seq_trimmed)[:]
+
+                for mutant in mutant_list:
+                    wt_aa, pos, idx_focus = mutant_to_letter_pos_idx_focus_list[mutant]
+                    mut_aa = mutant[-1]
+                    focus_seq_copy[idx_focus] = mut_aa
+
+                mutant_sequences.append("".join(focus_seq_copy))
+                valid_mutants.append(mutants)
+
+        print("Number of valid mutant sequences:", len(mutant_sequences))
+        if len(mutant_sequences) == 0:
+            raise ValueError("No valid mutant sequences found")
+
+        print("Making one-hot matrix")
+        # Then make the one hot sequence
+        mutant_sequences_one_hot = np.zeros((len(mutant_sequences), len(self.focus_cols), len(self.alphabet)))
+        for i, sequence in enumerate(mutant_sequences):
+            if i % 10 == 0:
+                print(i)
+            for j, letter in enumerate(sequence):
+                k = self.aa_dict[letter]
+                mutant_sequences_one_hot[i, j, k] = 1.0
+
+        prediction_matrix = np.zeros((mutant_sequences_one_hot.shape[0], N_pred_iterations))
+        batch_order = np.arange(mutant_sequences_one_hot.shape[0])
+
+        print("Getting ELBOs over ", N_pred_iterations, " iterations and ", minibatch_size, " size minibatches")
+        print("Prediction matrix size:", prediction_matrix.shape)
+
+        # Why not batch along the iterations direction? if we have mutants < minibatch_size this doesn't help.
+        #  Although if iterations is too big, it may not fit in a minibatch.
+        #  And if mutants is too big, it may also not fit.
+        for i in range(N_pred_iterations):
+            if i % 10 == 0:
+                print(i)
+            np.random.shuffle(batch_order)
+            for j in range(0, mutant_sequences_one_hot.shape[0], minibatch_size):
+                batch_index = batch_order[j:j + minibatch_size]
+                batch_preds, _, _ = model.all_likelihood_components(mutant_sequences_one_hot[batch_index])
+
+                for k, idx_batch in enumerate(batch_index.tolist()):
+                    prediction_matrix[idx_batch][i] = batch_preds[k]
+
+        # Then take the mean of all my elbo samples
+        mean_elbos = np.mean(prediction_matrix, axis=1).flatten().tolist()
+
+        # Remove the wild type sequence
+        wt_elbo = mean_elbos.pop(0)
+        valid_mutants.pop(0)
+
+        delta_elbos = np.asarray(mean_elbos) - wt_elbo
+        assert len(delta_elbos) == len(valid_mutants), "delta_elbos and valid_mutants should be the same length" + str(
+            len(delta_elbos)) + " " + str(len(valid_mutants))
+        elbos = pd.DataFrame({'DeepSequence': delta_elbos, 'mutant': valid_mutants})
+        print("elbos:\n", len(elbos), elbos.head(30))
+        df = df.merge(elbos, how='inner', on='mutant')
+        print("merged:\n", len(df), df.head())
+
+        print("Saving to file")
+        output_filename = output_filename_prefix + "_samples-" + str(N_pred_iterations) + "_elbo_predictions.csv"
+        if random_seed is not None:
+            output_filename = output_filename_prefix + "_samples-" + str(N_pred_iterations) + "_seed-" + str(random_seed) + "_elbo_predictions.csv"
+        df.to_csv(output_filename, index=False)
+
+        print("Written to file", output_filename)
+
     def custom_sequences(self, input_filename, model, N_pred_iterations=10, \
             minibatch_size=2000, filename_prefix="", offset=0):
 
@@ -680,15 +844,18 @@ class DataHelper:
         self.mutant_sequences_descriptor = ["wt"]
 
         # run through the input file
-        INPUT = open(self.working_dir+"/"+input_filename, "r")
+        if not os.path.isfile(input_filename):
+            input_filename = os.path.join(self.working_dir, input_filename)
+            assert os.path.isfile(input_filename), "File not found: "+input_filename
+
+        INPUT = open(input_filename, "r")
         #INPUT = open(input_filename, "r")
         header = ''
         new_line = ''
         alphabet = set(self.alphabet)
 
-        print(self.focus_seq)
-        print(self.focus_seq)
-        print(self.focus_seq_trimmed)
+        print("focus_seq", self.focus_seq)
+        print("focus_seq_trimmed", self.focus_seq_trimmed)
 
         for i,line in enumerate(INPUT):
             line = line.rstrip()
@@ -710,11 +877,6 @@ class DataHelper:
         if len(new_line) == len(self.focus_seq_trimmed):
             self.mutant_sequences.append(new_line)
             self.mutant_sequences_descriptor.append(header)
-
-        print(self.mutant_sequences_descriptor[0])
-        print(self.mutant_sequences[0])
-        print(self.mutant_sequences_descriptor[1])
-        print(self.mutant_sequences[1])
 
         INPUT.close()
         print(self.alphabet)
