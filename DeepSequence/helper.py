@@ -463,6 +463,108 @@ class DataHelper:
                 OUTPUT.write(descriptor+";"+str(self.delta_elbos[i])+"\n")
 
             OUTPUT.close()
+    
+    def custom_sequences(self, input_filename, model, N_pred_iterations=10, \
+            minibatch_size=2000, filename_prefix="", offset=0):
+
+        """ Predict the delta elbo for a fasta file of sequences
+        Sequences must have the same length as the alignment focus sequence from the training set.
+        """
+        # Get the start and end index from the sequence name
+        start_idx, end_idx = self.focus_seq_name.split("/")[-1].split("-")
+        start_idx = int(start_idx)
+
+        wt_pos_focus_idx_tuple_list = []
+        focus_seq_index = 0
+        focus_seq_list = []
+        mutant_to_letter_pos_idx_focus_list = {}
+
+        self.mutant_sequences = ["".join(self.focus_seq_trimmed)]
+        self.mutant_sequences_descriptor = ["wt"]
+
+        # run through the input file
+        INPUT = open(self.working_dir+"/"+input_filename, "r")
+        #INPUT = open(input_filename, "r")
+        header = ''
+        new_line = ''
+        alphabet = set(self.alphabet)
+
+        print(self.focus_seq)
+        print(self.focus_seq)
+        print(self.focus_seq_trimmed)
+
+        for i,line in enumerate(INPUT):
+            line = line.rstrip()
+            # if encountering header, after first, add prev entry to list
+            if line[0] == '>':
+                new_line = ''.join([aa for ix, aa in enumerate(new_line) if (ix in self.focus_cols)])
+                if len(new_line) == len(self.focus_seq_trimmed) and set(new_line).issubset(alphabet):
+                    self.mutant_sequences.append(new_line) #hack?
+                    self.mutant_sequences_descriptor.append(header)
+                else:
+                    print(len(new_line))
+                    print(set(new_line) - alphabet)
+                header = line[1:]
+                new_line = ''
+            else:
+                new_line = new_line + line
+        # add final entry
+        new_line = ''.join([letter for letter in new_line if (letter in alphabet)])
+        if len(new_line) == len(self.focus_seq_trimmed):
+            self.mutant_sequences.append(new_line)
+            self.mutant_sequences_descriptor.append(header)
+            
+        print(self.mutant_sequences_descriptor[0])
+        print(self.mutant_sequences[0])
+        print(self.mutant_sequences_descriptor[1])
+        print(self.mutant_sequences[1])
+        
+        INPUT.close()
+        print(self.alphabet)
+        # Then make the one hot sequence
+        self.mutant_sequences_one_hot = np.zeros(\
+            (len(self.mutant_sequences),len(self.focus_cols),len(self.alphabet)))
+
+        for i,sequence in enumerate(self.mutant_sequences):
+            for j,letter in enumerate(sequence):
+                if letter in self.aa_dict:
+                    k = self.aa_dict[letter]
+                    self.mutant_sequences_one_hot[i,j,k] = 1.0
+
+        self.prediction_matrix = np.zeros((self.mutant_sequences_one_hot.shape[0],N_pred_iterations))
+
+        batch_order = np.arange(self.mutant_sequences_one_hot.shape[0])
+
+        for i in range(N_pred_iterations):
+            np.random.shuffle(batch_order)
+
+            for j in range(0,self.mutant_sequences_one_hot.shape[0],minibatch_size):
+
+                batch_index = batch_order[j:j+minibatch_size]
+                batch_preds, _, _ = model.all_likelihood_components(self.mutant_sequences_one_hot[batch_index])
+
+                for k,idx_batch in enumerate(batch_index.tolist()):
+                    self.prediction_matrix[idx_batch][i]= batch_preds[k]
+
+        # Then take the mean of all my elbo samples
+        self.mean_elbos = np.mean(self.prediction_matrix, axis=1).flatten().tolist()
+
+        self.wt_elbo = self.mean_elbos.pop(0)
+        self.mutant_sequences_descriptor.pop(0)
+
+        self.delta_elbos = np.asarray(self.mean_elbos) - self.wt_elbo
+
+        if filename_prefix == "":
+            return self.mutant_sequences_descriptor, self.delta_elbos
+
+        else:
+
+            OUTPUT = open(filename_prefix, "w")
+
+            for i,descriptor in enumerate(self.mutant_sequences_descriptor):
+                OUTPUT.write(descriptor+","+str(self.delta_elbos[i])+"\n")
+
+            OUTPUT.close()
 
     def get_pattern_activations(self, model, update_num, filename_prefix="",
                         verbose=False, minibatch_size=2000):
