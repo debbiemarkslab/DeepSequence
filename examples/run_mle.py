@@ -5,9 +5,15 @@ sys.path.insert(0, "../DeepSequence/")
 import model
 import helper
 import train
+import argparse
+
+parser = argparse.ArgumentParser(description="Train DeepSequence with MLE.")
+parser.add_argument("--dataset", type=str, default="BLAT_ECOLX",
+                    help="Dataset name for fitting model.")
+args = parser.parse_args()
 
 data_params = {
-    "dataset"           :   "BLAT_ECOLX"
+    "dataset"           :   args.dataset,
     }
 
 model_params = {
