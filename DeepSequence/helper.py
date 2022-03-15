@@ -1062,3 +1062,66 @@ def gen_job_string(data_params, model_params):
 
 
     return job_str+"_"+"_".join(job_id_list)
+
+
+# Copied from Javier's /n/groups/marks/users/javier/ESM-1b/protein_transformer/utils/mutation_scoring.py
+def DMS_file_cleanup(DMS_data, target_seq, alphabet, start_idx=1, end_idx=None, DMS_mutant_column='mutant',
+                     DMS_phenotype_name='score', DMS_directionality=1, keep_singles_only=False):
+    import pandas as pd
+
+    end_idx = start_idx + len(target_seq) - 1 if end_idx is None else end_idx
+
+    DMS_data['mutant'] = DMS_data[DMS_mutant_column]
+    num_starting_mutants = len(DMS_data)
+    DMS_data = DMS_data[DMS_data['mutant'].notnull()].copy()  # This should be filtering NaNs
+    # Make sure we're filtering nans
+    DMS_data.dropna(subset=['mutant'], inplace=True)
+    # Different way of filtering nans
+    DMS_data = DMS_data[DMS_data['mutant'].apply(lambda x: isinstance(x, str))]
+
+    DMS_data = DMS_data[DMS_data['mutant'].apply(lambda x: all([len(y) >= 3 for y in x.split(":")]))].copy()  # filter first set of degenerate mutants
+
+    def is_int(s):
+        try:
+            int(s)
+            return True
+        except ValueError:
+            return False
+
+    DMS_data=DMS_data[DMS_data['mutant'].apply(lambda x: all([(y[0] in alphabet) and is_int(y[1:-1]) and (y[-1] in alphabet) for y in x.split(":")]))].copy()
+    num_valid_format_mutants = len(DMS_data)
+    print("num_valid_format_mutants", num_valid_format_mutants)
+
+    # TODO note the removal of these lines
+    # DMS_data = DMS_data[DMS_data['mutant'].apply(lambda x: all([int(y[1:-1]) - start_idx >= 0 and int(y[1:-1]) <= end_idx for y in x.split(":")]))].copy()
+    # DMS_data = DMS_data[DMS_data['mutant'].apply(lambda x: all([y[0] == target_seq[int(y[1:-1]) - start_idx] for y in x.split(":")]))].copy()  # This is done in the method
+    num_fully_valid_mutants = len(DMS_data)
+    print("num_fully_valid_mutants", num_fully_valid_mutants)
+    if num_fully_valid_mutants == 0:
+        raise ValueError("No fully valid mutants found")
+
+    DMS_data = DMS_data[DMS_data['mutant'].apply(lambda x: any([y[0] != y[-1] for y in x.split(":")]))].copy()  # At least of the mutations in mutant is not silent
+    num_fully_valid_non_silent_mutants = len(DMS_data)
+
+    if keep_singles_only:
+        DMS_data = DMS_data[DMS_data['mutant'].apply(lambda x: len(x.split(":")) == 1)].copy()
+        num_fully_valid_single_mutants = len(DMS_data)
+
+    DMS_data[DMS_phenotype_name] = pd.to_numeric(DMS_data[DMS_phenotype_name], errors='coerce')
+    DMS_data.dropna(subset=[DMS_phenotype_name], inplace=True)
+
+    DMS_data['DMS_score'] = DMS_data[DMS_phenotype_name] * DMS_directionality
+    DMS_data = DMS_data[['mutant', 'DMS_score']]
+
+    num_mutants_with_non_missing_DMS_score = len(DMS_data)
+    DMS_data = DMS_data.groupby('mutant').mean().reset_index()
+    num_distinct_mutants_with_non_missing_DMS_score = len(DMS_data)
+    if keep_singles_only:
+        quality_checks = [num_starting_mutants, num_valid_format_mutants, num_fully_valid_mutants,
+                          num_fully_valid_non_silent_mutants, num_fully_valid_single_mutants,
+                          num_mutants_with_non_missing_DMS_score, num_distinct_mutants_with_non_missing_DMS_score]
+    else:
+        quality_checks = [num_starting_mutants, num_valid_format_mutants, num_fully_valid_mutants,
+                          num_fully_valid_non_silent_mutants, num_mutants_with_non_missing_DMS_score,
+                          num_distinct_mutants_with_non_missing_DMS_score]
+    return DMS_data, quality_checks
