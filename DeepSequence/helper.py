@@ -110,6 +110,9 @@ class DataHelper:
             self.alphabet_type = "RNA"
             self.theta = 0.2
 
+        else:
+            self.alignment_file = self.working_dir+'/datasets/alignments/'+self.dataset+'.a2m'
+            self.theta = 0.2
 
     def one_hot_3D(self, s):
         """ Transform sequence string into one-hot aa vector"""
