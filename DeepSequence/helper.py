@@ -1,4 +1,8 @@
 from __future__ import print_function
+from collections import defaultdict
+import cPickle
+import os
+
 import numpy as np
 import theano
 import theano.tensor as T
@@ -9,14 +13,18 @@ import os
 
 class DataHelper:
     def __init__(self,
-        dataset="",
-        alignment_file="",
-        focus_seq_name="",
-        calc_weights=True,
-        working_dir=".",
-        theta=0.2,
-        load_all_sequences=True,
-        alphabet_type="protein"):
+                 dataset="",
+                 alignment_file="",
+                 focus_seq_name="",
+                 calc_weights=True,
+                 working_dir=".",
+                 theta=None,
+                 load_all_sequences=True,
+                 alphabet_type="protein",
+                 weights_dir="",
+                 save_weights=False,
+                 alignments_dir=None,
+                 ):
 
         """
         Class to load and organize alignment data.
@@ -42,6 +50,8 @@ class DataHelper:
         load_all_sequences:
         alphabet_type: Alphabet type of associated dataset.
                             Options are DNA, RNA, protein, allelic
+        weights_dir: location of the weights, assumed to be in form: <self.dataset>_<etc>.npy,
+            where etc could be theta_0.x
 
         Returns
         ------------
@@ -50,19 +60,24 @@ class DataHelper:
 
         np.random.seed(42)
         self.dataset = dataset
+        self.dataset = self.dataset.split(".a2m")[0]  # Remove prefix (if there's no prefix, this will still be ok)
         self.alignment_file = alignment_file
         self.focus_seq_name = focus_seq_name
         self.working_dir = working_dir
         self.calc_weights = calc_weights
         self.alphabet_type = alphabet_type
+        self.weights_dir = weights_dir
+        self.save_weights = save_weights
+        self.alignments_dir = alignments_dir
 
         # Initalize the elbo of the wt to None
         #   will be useful if eventually doing mutation effect prediction
         self.wt_elbo = None
 
         # Alignment processing parameters
-        self.theta = theta
-
+        # Note: Script will fail if calc_weights is True and theta is not set
+        if theta is not None:
+            self.theta = theta
         # If I am running tests with the model, I don't need all the
         #    sequences loaded
         self.load_all_sequences = load_all_sequences
@@ -75,9 +90,15 @@ class DataHelper:
         if self.alphabet_type == "protein":
             self.alphabet = "ACDEFGHIKLMNPQRSTVWY"
             self.reorder_alphabet = "DEKRHNQSTPGAVILMCFYW"
+        elif self.alphabet_type == "protein_withgap":
+            self.alphabet = "ACDEFGHIKLMNPQRSTVWY-"
+            self.reorder_alphabet = "DEKRHNQSTPGAVILMCFYW-"
         elif self.alphabet_type == "RNA":
             self.alphabet = "ACGU"
             self.reorder_alphabet = "ACGU"
+        elif self.alphabet_type == "RNA_withgap":
+            self.alphabet = "ACGU-"
+            self.reorder_alphabet = "ACGU-"
         elif self.alphabet_type == "DNA":
             self.alphabet = "ACGT"
             self.reorder_alphabet = "ACGT"
@@ -85,7 +106,7 @@ class DataHelper:
             self.alphabet = "012"
             self.reorder_alphabet = "012"
 
-        #then generate the experimental data
+        # then generate the experimental data
         self.gen_basic_alignment()
 
         if self.load_all_sequences:
@@ -94,25 +115,159 @@ class DataHelper:
     def configure_datasets(self):
 
         if self.dataset == "BLAT_ECOLX":
-            self.alignment_file = self.working_dir+"/datasets/BLAT_ECOLX_hmmerbit_plmc_n5_m30_f50_t0.2_r24-286_id100_b105.a2m"
+            self.alignment_file = self.working_dir + "/datasets/alignments/BLAT_ECOLX_hmmerbit_plmc_n5_m30_f50_t0.2_r24-286_id100_b105.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "BLAT_ECOLX_withgaps":
+            self.alignment_file = self.working_dir + "/datasets/alignments/BLAT_ECOLX_1_b0.5.a2m"
+            self.alphabet_type = "protein_withgap"
+            self.theta = 0.2
+
+        elif self.dataset == "PTEN_HUMAN_withgaps":
+            self.alignment_file = self.working_dir + "/datasets/alignments/PTEN_HUMAN_1_b0.3.a2m"
+            self.alphabet_type = "protein_withgap"
+            self.theta = 0.2
+
+        elif self.dataset == "HIS7_YEAST_withgaps":
+            self.alignment_file = self.working_dir + "/datasets/alignments/HIS7_YEAST_1_b0.5.a2m"
+            self.alphabet_type = "protein_withgap"
+            self.theta = 0.2
+
+        elif self.dataset == "P53_HUMAN_withgaps":
+            self.alignment_file = self.working_dir + "/datasets/alignments/P53_HUMAN_r90-300_uniref100_Nov17_b0.06.a2m"
+            self.alphabet_type = "protein_withgap"
+            self.theta = 0.2
+
+        elif self.dataset == "SNORNA_YEAST_withgaps":
+            self.alignment_file = self.working_dir + "/datasets/alignments/CL00100_cmRF00012_m70_f50.a2m"
+            self.alphabet_type = "RNA_withgap"
+            self.theta = 0.2
+
+        elif self.dataset == 'naive_repertoire_fullseqs_withgaps':
+            self.alignment_file = self.working_dir + '/datasets/alignments/naive_repertoire_annotated_aligned_fullseqs.fa'
+            self.alphabet_type = "protein_withgap"
             self.theta = 0.2
 
         elif self.dataset == "PABP_YEAST":
-            self.alignment_file = self.working_dir+"/datasets/PABP_YEAST_hmmerbit_plmc_n5_m30_f50_t0.2_r115-210_id100_b48.a2m"
+            self.alignment_file = self.working_dir + "/datasets/PABP_YEAST_hmmerbit_plmc_n5_m30_f50_t0.2_r115-210_id100_b48.a2m"
             self.theta = 0.2
 
         elif self.dataset == "DLG4_RAT":
-            self.alignment_file = self.working_dir+"/datasets/DLG4_RAT_hmmerbit_plmc_n5_m30_f50_t0.2_r300-400_id100_b50.a2m"
+            self.alignment_file = self.working_dir + "/datasets/DLG4_RAT_hmmerbit_plmc_n5_m30_f50_t0.2_r300-400_id100_b50.a2m"
             self.theta = 0.2
 
         elif self.dataset == "trna":
-            self.alignment_file = self.working_dir+"/datasets/RF00005_CCU.fasta"
+            self.alignment_file = self.working_dir + "/datasets/RF00005_CCU.fasta"
             self.alphabet_type = "RNA"
             self.theta = 0.2
 
-        else:
-            self.alignment_file = self.working_dir+'/datasets/alignments/'+self.dataset+'.a2m'
+        elif self.dataset == "PA_FLU":
+            self.alignment_file = self.working_dir + "/datasets/alignments/PA_FLU_1_b0.5.a2m"
             self.theta = 0.2
+
+        elif self.dataset == "PA_FLU_orig":
+            self.alignment_file = self.working_dir + "/datasets/alignments/PA_FLU_1_b0.5.a2m"
+            self.theta = 0.01
+
+        elif self.dataset == "PA_FLU_jonny":
+            self.alignment_file = self.working_dir + "/datasets/alignments/PA_FLU_jonny_1_b0.5.a2m"
+            self.theta = 0.2
+            self.calc_weights = False
+
+        elif self.dataset == "DPO1_KLULA":
+            self.alignment_file = self.working_dir + "/datasets/alignments/DPO1_KLULA_b0.1.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "DRTS_PLAFK":
+            self.alignment_file = self.working_dir + "/datasets/alignments/DRTS_PLAFK_r1-280_b0.1.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "HIS4_THEMA":
+            self.alignment_file = self.working_dir + "/datasets/alignments/HIS4_THEMA_b0.2.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "HIS4_YEAST":
+            self.alignment_file = self.working_dir + "/datasets/alignments/HIS4_YEAST_b0.2.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "HIS4_YEAST_b0.1":
+            self.alignment_file = self.working_dir + "/datasets/alignments/HIS4_YEAST_b0.1.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "HIS4_THEMA_b0.1":
+            self.alignment_file = self.working_dir + "/datasets/alignments/HIS4_THEMA_b0.1.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "TRP_YEAST":
+            self.alignment_file = self.working_dir + "/datasets/alignments/TRP_YEAST_b0.1.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "TRPB1_THEMA":
+            self.alignment_file = self.working_dir + "/datasets/alignments/TRPB1_THEMA_b0.4.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "TRPB2_THEMA":
+            self.alignment_file = self.working_dir + "/datasets/alignments/TRPB2_THEMA_b0.4.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "TRPF_YEAST":
+            self.alignment_file = self.working_dir + "/datasets/alignments/TRPF_YEAST_b0.2.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "TRPF_YEAST_b0.1":
+            self.alignment_file = self.working_dir + "/datasets/alignments/TRPF_YEAST_b0.1.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "BLAT_ECOLX_1_seqid0.3":
+            self.alignment_file = self.working_dir + "/datasets/alignments/BLAT_ECOLX_1_b0.5_seqid0.3.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "BLAT_ECOLX_1":
+            self.alignment_file = self.working_dir + "/datasets/alignments/BLAT_ECOLX_1_b0.5.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "AMIE_PSEAE_1_seqid0.3":
+            self.alignment_file = self.working_dir + "/datasets/alignments/AMIE_PSEAE_1_b0.3_seqid0.3.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "AMIE_PSEAE_1":
+            self.alignment_file = self.working_dir + "/datasets/alignments/AMIE_PSEAE_1_b0.3.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == "P53_HUMAN":
+            self.alignment_file = self.working_dir + "/datasets/alignments/P53_HUMAN_r90-300_uniref100_Nov17_b0.06.a2m"
+            self.theta = 0.2
+
+        elif self.dataset == 'BF520_env':
+            self.alignment_file = self.working_dir + '/datasets/alignments/BF520_env_1_b0.5.a2m'
+            self.theta = 0.01
+
+        elif self.dataset == 'BG505_env':
+            self.alignment_file = self.working_dir + '/datasets/alignments/BG505_env_1_b0.5.a2m'
+            self.theta = 0.01
+
+        elif self.dataset == 'deltaNTRP_YEAST':
+            self.alignment_file = self.working_dir + '/datasets/alignments/deltaNTRP_YEAST_b0.4.a2m'
+            self.theta = 0.2
+
+        elif self.dataset == 'PfDHFR':
+            self.alignment_file = self.working_dir + '/datasets/alignments/PfDHFR_b0.1.a2m'
+            self.theta = 0.2
+
+        elif self.dataset == 'TP-DNAP1':
+            self.alignment_file = self.working_dir + '/datasets/alignments/TP-DNAP1_b0.1.a2m'
+            self.theta = 0.2
+
+        elif self.dataset == 'BRCA1_HUMAN':
+            self.alignment_file = self.working_dir + '/datasets/alignments/BRCA1_HUMAN_1_b0.5.a2m'
+            self.theta = 0.2
+
+        else:
+            if self.alignments_dir is not None:
+                self.alignment_file = os.path.join(self.alignments_dir, self.dataset + ".a2m")
+            else:
+                self.alignment_file = self.working_dir + '/datasets/alignments/' + self.dataset + '.a2m'
+        assert os.path.isfile(self.alignment_file), "Alignment file not found: " + self.alignment_file
 
     def one_hot_3D(self, s):
         """ Transform sequence string into one-hot aa vector"""
@@ -120,18 +275,18 @@ class DataHelper:
         x = np.zeros((len(s), len(self.alphabet)))
         for i, letter in enumerate(s):
             if letter in self.aa_dict:
-                x[i , self.aa_dict[letter]] = 1
+                x[i, self.aa_dict[letter]] = 1
         return x
 
     def gen_basic_alignment(self):
         """ Read training alignment and store basics in class instance """
         # Make a dictionary that goes from aa to a number for one-hot
         self.aa_dict = {}
-        for i,aa in enumerate(self.alphabet):
+        for i, aa in enumerate(self.alphabet):
             self.aa_dict[aa] = i
 
         # Do the inverse as well
-        self.num_to_aa = {i:aa for aa,i in self.aa_dict.items()}
+        self.num_to_aa = {i: aa for aa, i in self.aa_dict.items()}
 
         ix = np.array([self.alphabet.find(s) for s in self.reorder_alphabet])
 
@@ -165,8 +320,12 @@ class DataHelper:
 
         # We also expect the focus sequence to be formatted as:
         # >[NAME]/[start]-[end]
-        focus_loc = self.focus_seq_name.split("/")[-1]
-        start,stop = focus_loc.split("-")
+        focus_loc = self.focus_seq_name
+        # Can include extra information (e.g. a custom weight) after the fasta header
+        if ':' in focus_loc:
+            focus_loc = focus_loc[:focus_loc.rfind(':')]
+        focus_loc = focus_loc.split("/")[-1]
+        start, stop = focus_loc.split("-")
         self.focus_start_loc = int(start)
         self.focus_stop_loc = int(stop)
         self.uniprot_focus_cols_list \
@@ -176,21 +335,20 @@ class DataHelper:
         self.uniprot_focus_col_to_focus_idx \
             = {idx_col+int(start):idx_col for idx_col in self.focus_cols}
 
-
     def gen_full_alignment(self):
 
         # Get only the focus columns
-        for seq_name,sequence in self.seq_name_to_sequence.items():
+        for seq_name, sequence in self.seq_name_to_sequence.items():
             # Replace periods with dashes (the uppercase equivalent)
-            sequence = sequence.replace(".","-")
+            sequence = sequence.replace(".", "-")
 
-            #then get only the focus columns
+            # then get only the focus columns
             self.seq_name_to_sequence[seq_name] = [sequence[ix].upper() for ix in self.focus_cols]
 
         # Remove sequences that have bad characters
         alphabet_set = set(list(self.alphabet))
         seq_names_to_remove = []
-        for seq_name,sequence in self.seq_name_to_sequence.items():
+        for seq_name, sequence in self.seq_name_to_sequence.items():
             for letter in sequence:
                 if letter not in alphabet_set and letter != "-":
                     seq_names_to_remove.append(seq_name)
@@ -200,17 +358,16 @@ class DataHelper:
             del self.seq_name_to_sequence[seq_name]
 
         # Encode the sequences
-        print ("Encoding sequences")
-        self.x_train = np.zeros((len(self.seq_name_to_sequence.keys()),len(self.focus_cols),len(self.alphabet)))
+        print("Encoding sequences")
+        self.x_train = np.zeros((len(self.seq_name_to_sequence.keys()), len(self.focus_cols), len(self.alphabet)))
         self.x_train_name_list = []
-        for i,seq_name in enumerate(self.seq_name_to_sequence.keys()):
+        for i, seq_name in enumerate(self.seq_name_to_sequence.keys()):
             sequence = self.seq_name_to_sequence[seq_name]
             self.x_train_name_list.append(seq_name)
-            for j,letter in enumerate(sequence):
+            for j, letter in enumerate(sequence):
                 if letter in self.aa_dict:
                     k = self.aa_dict[letter]
-                    self.x_train[i,j,k] = 1.0
-
+                    self.x_train[i, j, k] = 1.0
 
         # Fast sequence weights with Theano
         if self.calc_weights:
@@ -229,15 +386,57 @@ class DataHelper:
             #
             self.weights = weightfun(self.x_train, self.theta)[0]
 
+            if self.save_weights:
+                print("Saving sequence weights, dataset={} in  dir {}".format(self.dataset, self.weights_dir))
+                if os.path.isdir(self.weights_dir):
+                    weights_dir_found = self.weights_dir
+                else:
+                    weights_dir_found = os.path.join(self.working_dir, self.weights_dir)
+                    assert os.path.isdir(weights_dir_found), "Could not find weights directory: {} given, expanded to {} using working_dir".format(self.weights_dir, weights_dir_found)
+                # e.g. BLAT_ECOLX_theta_0.2.npy
+                filename_out = os.path.join(weights_dir_found, "{}_theta_{}.npy".format(self.dataset, self.theta))
+                print("Saving weights to {}".format(filename_out))
+                np.save(filename_out, self.weights)
+
         else:
-            # If not using weights, use an isotropic weight matrix
-            self.weights = np.ones(self.x_train.shape[0])
+            if ':' in self.focus_seq_name:
+                print("Loading detected sequence weights")
+                self.weights = np.zeros(self.x_train.shape[0])
+                for i, seq_name in enumerate(self.x_train_name_list):
+                    self.weights[i] = float(seq_name.split(':')[-1])
+            elif self.weights_dir != "":
+                print("Loading sequence weights from file, looking for {} in {}".format(self.dataset, self.weights_dir))
+
+                # Get UniProt ID (the prefix before the second underscore)
+                # TODO Note: This fails for some of the MSA,weight pairs in the original DeepSeq dataset,
+                #  since they don't have unique UniProt ids
+                dataset_prefix = "_".join(self.dataset.split("_")[:2])
+                # Set path
+                if os.path.isdir(self.weights_dir):
+                    weights_dir_found = self.weights_dir
+                else:
+                    weights_dir_found = os.path.join(self.working_dir, self.weights_dir)
+                assert os.path.isdir(weights_dir_found), "Could not find weights directory: {} given, expanded to {}".format(
+                        self.weights_dir, weights_dir_found)
+
+                # Find weights file using dataset prefix
+                found = [file for file in os.listdir(weights_dir_found) if file.startswith(dataset_prefix) and file.endswith(".npy")]
+                assert len(found) == 1, \
+                    "Could not find unique weights file for dataset {} with prefix {}, in {}, found {} files"\
+                    .format(self.dataset, dataset_prefix, weights_dir_found, found)
+                weights_location = os.path.join(weights_dir_found, found[0])
+
+                self.weights = np.load(file=weights_location)
+                print("Weights loaded from {}".format(weights_location))
+            else:
+                # If not using weights, use an isotropic weight matrix
+                print("Not using weights, using isotropic weight matrix")
+                self.weights = np.ones(self.x_train.shape[0])
 
         self.Neff = np.sum(self.weights)
 
         print ("Neff =",str(self.Neff))
         print ("Data Shape =",self.x_train.shape)
-
 
     def delta_elbo(self, model, mutant_tuple_list, N_pred_iterations=10):
 
@@ -250,7 +449,6 @@ class DataHelper:
         mut_seq = self.focus_seq_trimmed[:]
         for pos,wt_aa,mut_aa in mutant_tuple_list:
             mut_seq[self.uniprot_focus_col_to_focus_idx[pos]] = mut_aa
-
 
         if self.wt_elbo == None:
             mutant_sequences = [self.focus_seq_trimmed, mut_seq]
@@ -269,7 +467,6 @@ class DataHelper:
         prediction_matrix = np.zeros((mutant_sequences_one_hot.shape[0],N_pred_iterations))
         idx_batch = np.arange(mutant_sequences_one_hot.shape[0])
         for i in range(N_pred_iterations):
-
             batch_preds, _, _ = model.all_likelihood_components(mutant_sequences_one_hot)
 
             prediction_matrix[:,i] = batch_preds
@@ -463,7 +660,7 @@ class DataHelper:
                 OUTPUT.write(descriptor+";"+str(self.delta_elbos[i])+"\n")
 
             OUTPUT.close()
-    
+
     def custom_sequences(self, input_filename, model, N_pred_iterations=10, \
             minibatch_size=2000, filename_prefix="", offset=0):
 
@@ -513,12 +710,12 @@ class DataHelper:
         if len(new_line) == len(self.focus_seq_trimmed):
             self.mutant_sequences.append(new_line)
             self.mutant_sequences_descriptor.append(header)
-            
+
         print(self.mutant_sequences_descriptor[0])
         print(self.mutant_sequences[0])
         print(self.mutant_sequences_descriptor[1])
         print(self.mutant_sequences[1])
-        
+
         INPUT.close()
         print(self.alphabet)
         # Then make the one hot sequence
@@ -590,7 +787,6 @@ class DataHelper:
 
         OUTPUT.close()
 
-
     def get_embeddings(self, model, update_num, filename_prefix="",
                         verbose=False, minibatch_size=2000):
         """ Save the latent variables from all the sequences in the alignment """
@@ -608,7 +804,6 @@ class DataHelper:
 
             header_list = mu_header_list + log_sigma_header_list
             OUTPUT.write("update_num,name,"+",".join(header_list)+"\n")
-
 
         batch_order = np.arange(len(self.x_train_name_list))
 
@@ -645,6 +840,7 @@ class DataHelper:
                 for k,idx_batch in enumerate(batch_index.tolist()):
                     self.prediction_matrix[idx_batch][i]= batch_preds[k]
 
+
 def gen_job_string(data_params, model_params):
     """
         Generates a unique job string given data and model parameters.
@@ -679,6 +875,7 @@ def gen_job_string(data_params, model_params):
     encoder_architecture_str = "-".join([str(size) for size in encoder_architecture])
     decoder_architecture_str = "-".join([str(size) for size in decoder_architecture])
 
+    # Note: If job_str is too long it will cause an error when saving
     job_str = "vae_output_encoder-"+encoder_architecture_str+"_Nlatent-"+str(n_latent)\
         +"_decoder-"+decoder_architecture_str
 
@@ -687,6 +884,9 @@ def gen_job_string(data_params, model_params):
         if data_id not in written_out_vals:
             if str(type(data_val)) == "<type 'list'>":
                 job_id_list.append(data_id+"-"+"-".join([str(val) for val in data_val]))
+            # LvN: Skipped '/' character because it causes errors when using job_id as filename
+            elif isinstance(data_val, str) and "/" in data_val:
+                pass
             else:
                 job_id_list.append(data_id+"-"+str(data_val))
 
